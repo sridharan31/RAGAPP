@@ -217,6 +217,129 @@ class QdrantService {
       return { status: 'unhealthy', error: error.message };
     }
   }
+
+  // Initialize collection with custom name
+  async initializeCollection(vectorSize = 768, collectionName = null) {
+    const targetCollection = collectionName || this.collectionName;
+    
+    try {
+      // Check if collection exists
+      const collections = await this.client.getCollections();
+      const collectionExists = collections.collections.some(
+        col => col.name === targetCollection
+      );
+
+      if (!collectionExists) {
+        console.log(`Creating collection: ${targetCollection}`);
+        await this.client.createCollection(targetCollection, {
+          vectors: {
+            size: vectorSize,
+            distance: 'Cosine',
+          },
+          optimizers_config: {
+            default_segment_number: 2,
+          },
+          replication_factor: 1,
+        });
+        console.log(`✅ Collection ${targetCollection} created successfully`);
+      } else {
+        console.log(`Collection ${targetCollection} already exists`);
+      }
+
+      // Create indexes for better performance
+      await this.client.createPayloadIndex(targetCollection, {
+        field_name: 'sessionId',
+        field_schema: 'keyword',
+      });
+
+      await this.client.createPayloadIndex(targetCollection, {
+        field_name: 'type',
+        field_schema: 'keyword',
+      });
+
+      await this.client.createPayloadIndex(targetCollection, {
+        field_name: 'role',
+        field_schema: 'keyword',
+      });
+
+      console.log(`✅ Payload indexes created for ${targetCollection}`);
+    } catch (error) {
+      console.error(`Error initializing collection ${targetCollection}:`, error);
+      throw error;
+    }
+  }
+
+  // Add document to specific collection with retry logic
+  async addDocumentToCollection(collectionName, id, vector, metadata) {
+    const maxRetries = 3;
+    let retries = 0;
+    
+    while (retries < maxRetries) {
+      try {
+        const point = {
+          id: id,
+          vector: vector,
+          payload: {
+            content: metadata.content,
+            document_name: metadata.name,
+            timestamp: metadata.timestamp || new Date().toISOString(),
+            ...metadata
+          }
+        };
+
+        await this.client.upsert(collectionName, {
+          wait: true,
+          points: [point]
+        });
+
+        console.log(`✅ Document ${id} added to Qdrant collection ${collectionName}`);
+        return { success: true, id };
+      } catch (error) {
+        retries++;
+        console.error(`Error adding document to Qdrant collection ${collectionName} (attempt ${retries}/${maxRetries}):`, error.message);
+        
+        if (retries >= maxRetries) {
+          throw new Error(`Failed to add document after ${maxRetries} attempts: ${error.message}`);
+        }
+        
+        // Wait before retry (exponential backoff)
+        await new Promise(resolve => setTimeout(resolve, 1000 * retries));
+      }
+    }
+  }
+
+  // Search in specific collection with filters
+  async searchInCollection(collectionName, queryVector, limit = 10, filters = {}) {
+    try {
+      const searchParams = {
+        vector: queryVector,
+        limit: limit,
+        with_payload: true,
+        with_vector: false
+      };
+
+      if (Object.keys(filters).length > 0) {
+        searchParams.filter = {
+          must: Object.entries(filters).map(([key, value]) => ({
+            key: key,
+            match: { value: value }
+          }))
+        };
+      }
+
+      const searchResult = await this.client.search(collectionName, searchParams);
+      
+      return searchResult.map(result => ({
+        id: result.id,
+        score: result.score,
+        content: result.payload.content,
+        metadata: result.payload
+      }));
+    } catch (error) {
+      console.error(`Error searching in collection ${collectionName}:`, error);
+      throw error;
+    }
+  }
 }
 
 module.exports = QdrantService;

@@ -3,10 +3,45 @@ var router = express.Router();
 const mongodb= require("mongodb");
 const createEmbedding = require("./embedings");
 const QdrantService = require("../services/qdrant");
+const { v4: uuidv4 } = require('uuid');
+const multer = require('multer');
 
 const path = require('path');
 const PDFParser = require("pdf2json");
 const fs = require("fs");
+
+// Configure multer for file uploads
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    const uploadDir = path.join(__dirname, '../uploads');
+    // Create uploads directory if it doesn't exist
+    if (!fs.existsSync(uploadDir)) {
+      fs.mkdirSync(uploadDir, { recursive: true });
+    }
+    cb(null, uploadDir);
+  },
+  filename: function (req, file, cb) {
+    // Keep original filename with timestamp
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, uniqueSuffix + '-' + file.originalname);
+  }
+});
+
+const upload = multer({ 
+  storage: storage,
+  fileFilter: function (req, file, cb) {
+    // Only allow PDF files
+    if (file.mimetype === 'application/pdf') {
+      cb(null, true);
+    } else {
+      cb(new Error('Only PDF files are allowed!'), false);
+    }
+  },
+  limits: {
+    fileSize: 10 * 1024 * 1024 // 10MB limit
+  }
+});
+
 const pdfParser = new PDFParser(this, 1);
 /* GET home page. */
 router.get('/', async function(req, res, next) {
@@ -54,9 +89,37 @@ const parsePDF = (filePath) => {
     pdfParser.loadPDF(filePath);
   });
 };
-router.post('/Load-document', async function(req, res, next) {
+router.post('/Load-document', upload.single('pdfFile'), async function(req, res, next) {
   try {
-    const pdfPath = path.join(__dirname, '../doc/Motor-Vehicle-Insurance.pdf');
+    let pdfPath;
+    let pdfFileName;
+    
+    // Check if file was uploaded or use default path
+    if (req.file) {
+      // Use uploaded file
+      pdfPath = req.file.path;
+      pdfFileName = req.file.originalname;
+      console.log('Processing uploaded file:', pdfFileName);
+    } else if (req.body.useDefault === 'true') {
+      // Use default file if explicitly requested
+      pdfPath = path.join(__dirname, '../doc/Motor-Vehicle-Insurance.pdf');
+      pdfFileName = 'Motor-Vehicle-Insurance.pdf';
+      console.log('Processing default file:', pdfFileName);
+    } else {
+      return res.status(400).json({
+        error: "No file uploaded",
+        message: "Please upload a PDF file or set 'useDefault' to 'true' to use the default document"
+      });
+    }
+
+    // Check if file exists
+    if (!fs.existsSync(pdfPath)) {
+      return res.status(404).json({
+        error: "File not found",
+        message: `The file ${pdfFileName} does not exist`
+      });
+    }
+
     const pdfText = await parsePDF(pdfPath);
     
     // Write extracted text to file
@@ -100,23 +163,26 @@ router.post('/Load-document', async function(req, res, next) {
             
             // Create document metadata
             const documentMetadata = {
-              name: "Motor-Vehicle-Insurance.pdf",
+              name: pdfFileName,
               content: line,
               timestamp: new Date(),
-              chunk_index: processedCount
+              chunk_index: processedCount,
+              source_file: pdfFileName
             };
             
             if (useQdrant) {
               // Store vector in Qdrant and metadata in MongoDB
               const documentId = `doc_${Date.now()}_${processedCount}`;
+              const documentPointId = uuidv4();
               
-              // Add to Qdrant
-              await qdrant.addDocument(documentId, embedding, documentMetadata);
+              // Add to Qdrant with UUID
+              await qdrant.addDocument(documentPointId, embedding, documentMetadata);
               
               // Store minimal metadata in MongoDB (without embedding to save space)
               await mongoCollection.insertOne({
                 ...documentMetadata,
-                qdrant_id: documentId,
+                qdrant_id: documentPointId,
+                document_id: documentId,
                 has_vector: true
               });
             } else {
@@ -143,21 +209,44 @@ router.post('/Load-document', async function(req, res, next) {
     await connection.close();
     
     const message = useQdrant 
-      ? `PDF parsed and saved successfully. ${processedCount} chunks stored in Qdrant + MongoDB.`
-      : `PDF parsed and saved successfully. ${processedCount} chunks stored in MongoDB only.`;
+      ? `PDF "${pdfFileName}" parsed and saved successfully. ${processedCount} chunks stored in Qdrant + MongoDB.`
+      : `PDF "${pdfFileName}" parsed and saved successfully. ${processedCount} chunks stored in MongoDB only.`;
+    
+    // Clean up uploaded file after processing (optional)
+    if (req.file && fs.existsSync(pdfPath)) {
+      try {
+        fs.unlinkSync(pdfPath);
+        console.log('Uploaded file cleaned up:', pdfPath);
+      } catch (cleanupError) {
+        console.warn('Failed to clean up uploaded file:', cleanupError.message);
+      }
+    }
     
     res.status(200).json({
       success: true,
       message: message,
+      filename: pdfFileName,
       chunks_processed: processedCount,
       storage_type: useQdrant ? "hybrid" : "mongodb_only"
     });
     
   } catch (error) {
     console.error("Error loading or parsing PDF:", error);
+    
+    // Clean up uploaded file on error
+    if (req.file && fs.existsSync(req.file.path)) {
+      try {
+        fs.unlinkSync(req.file.path);
+        console.log('Uploaded file cleaned up after error:', req.file.path);
+      } catch (cleanupError) {
+        console.warn('Failed to clean up uploaded file after error:', cleanupError.message);
+      }
+    }
+    
     res.status(500).json({
       error: "Failed to load or parse PDF",
-      message: error.message
+      message: error.message,
+      filename: req.file ? req.file.originalname : 'unknown'
     });
   }
 });
@@ -241,7 +330,153 @@ router.get('/google-embeddings', async function(req, res, next) {
     });
   }
 });
+router.post("/conversation", async (req, res) => {
+  try {
+    let sessionId = req.body.sessionId;
+    const message = req.body.message;
+    
+    if (!message) {
+      return res.status(400).json({ error: "Message is required" });
+    }
 
+    const qdrant = new QdrantService();
+    
+    // Check if Qdrant is available
+    const qdrantHealth = await qdrant.healthCheck();
+    if (qdrantHealth.status !== 'healthy') {
+      return res.status(503).json({ 
+        error: "Qdrant service unavailable", 
+        message: "Conversation service is not available" 
+      });
+    }
+
+    // Initialize collections
+    await qdrant.initializeCollection(768, "sessions");
+    await qdrant.initializeCollection(768, "conversations");
+    
+    if (!sessionId) {
+      // Create new session in Qdrant
+      sessionId = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      
+      // Create a dummy vector for session storage
+      const sessionVector = new Array(768).fill(0);
+      
+      // Generate UUID for Qdrant point ID
+      const sessionPointId = uuidv4();
+      
+      // Store session in Qdrant
+      await qdrant.addDocumentToCollection("sessions", sessionPointId, sessionVector, {
+        sessionId: sessionId,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        type: "session"
+      });
+      
+      console.log("New session created:", sessionId);
+    } else {
+      // Verify session exists in Qdrant
+      try {
+        const sessionExists = await qdrant.searchInCollection("sessions", new Array(768).fill(0), 1, {
+          sessionId: sessionId
+        });
+        
+        if (!sessionExists || sessionExists.length === 0) {
+          return res.status(404).json({
+            message: "Session not found"
+          });
+        }
+        console.log("Session found:", sessionId);
+      } catch (error) {
+        return res.status(404).json({
+          message: "Session not found"
+        });
+      }
+    }
+
+    // Create embedding for the message
+    const messageVector = await createEmbedding(message);
+    
+    // Store user message in Qdrant conversations collection with error handling
+    const userMessagePointId = uuidv4();
+    try {
+      await qdrant.addDocumentToCollection("conversations", userMessagePointId, messageVector, {
+        sessionId: sessionId,
+        message: message,
+        role: "user",
+        createdAt: new Date().toISOString(),
+        type: "conversation"
+      });
+    } catch (error) {
+      console.error("Failed to store user message in Qdrant:", error.message);
+      // Continue processing even if storage fails
+    }
+
+    // Perform vector search on documents collection
+    let finalResult = [];
+    try {
+      const searchResults = await qdrant.search(messageVector, 10);
+      finalResult = searchResults.map(doc => ({
+        text: doc.content,
+        score: doc.score
+      }));
+    } catch (qdrantError) {
+      console.error("Qdrant search failed:", qdrantError);
+      return res.status(500).json({
+        error: "Search failed",
+        message: "Unable to retrieve relevant documents"
+      });
+    }
+
+    // Generate AI response using Google Generative AI
+    const { GoogleGenerativeAI } = require("@google/generative-ai");
+    const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
+    
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+    
+    const contextText = finalResult.map(doc => doc.text).join("\n");
+    const prompt = `You are a humble helper who can answer questions asked by users from the given context.
+
+Context:
+${contextText}
+
+User Question: ${message}
+
+Please provide a helpful answer based on the context provided.`;
+
+    const result = await model.generateContent(prompt);
+    const chat = result.response.text();
+
+    // Store AI response in Qdrant conversations collection with error handling
+    const aiResponseVector = await createEmbedding(chat);
+    const aiMessagePointId = uuidv4();
+    try {
+      await qdrant.addDocumentToCollection("conversations", aiMessagePointId, aiResponseVector, {
+        sessionId: sessionId,
+        message: chat,
+        role: "assistant",
+        createdAt: new Date().toISOString(),
+        type: "conversation"
+      });
+    } catch (error) {
+      console.error("Failed to store AI response in Qdrant:", error.message);
+      // Continue and return response even if storage fails
+    }
+
+    return res.json({
+      sessionId: sessionId,
+      message: chat,
+      context_documents: finalResult.length,
+      search_type: 'qdrant'
+    });
+    
+  } catch (error) {
+    console.error("Error in conversation:", error);
+    res.status(500).json({
+      error: "Internal server error",
+      message: error.message
+    });
+  }
+})
 // Search route for full-text search
 router.get('/search', async function(req, res, next) {
   try {
