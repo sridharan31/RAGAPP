@@ -1,10 +1,10 @@
 var express = require('express');
 var router = express.Router();
-const mongodb= require("mongodb");
 const createEmbedding = require("./embedings");
 const QdrantService = require("../services/qdrant");
 const { v4: uuidv4 } = require('uuid');
 const multer = require('multer');
+const axios = require('axios');
 
 const path = require('path');
 const PDFParser = require("pdf2json");
@@ -135,22 +135,20 @@ router.post('/Load-document', upload.single('pdfFile'), async function(req, res,
     
     // Check if Qdrant is available
     const qdrantHealth = await qdrant.healthCheck();
-    const useQdrant = qdrantHealth.status === 'healthy';
-    
-    if (useQdrant) {
-      console.log("✅ Qdrant is available, using hybrid storage (MongoDB + Qdrant)");
-      await qdrant.initializeCollection(768); // Initialize collection if needed
-    } else {
-      console.log("⚠️ Qdrant not available, using MongoDB only");
+    if (qdrantHealth.status !== 'healthy') {
+      return res.status(503).json({ 
+        success: false,
+        error: "Qdrant service unavailable", 
+        message: "Document processing service is not available. Please ensure Qdrant is running." 
+      });
     }
-    
-    // Connect to MongoDB for metadata storage
-    const connection = await mongodb.MongoClient.connect(process.env.DB);
-    const db = connection.db("rag_doc");
-    const mongoCollection = db.collection("documents");
+
+    console.log("✅ Qdrant is available, processing document...");
+    await qdrant.initializeCollection(768); // Initialize collection if needed
     
     let processedCount = 0;
     const batchSize = 5; // Process in smaller batches
+    const fileSize = pdfText.length;
     
     for (let i = 0; i < splitContext.length; i += batchSize) {
       const batch = splitContext.slice(i, i + batchSize);
@@ -164,35 +162,21 @@ router.post('/Load-document', upload.single('pdfFile'), async function(req, res,
             // Create document metadata
             const documentMetadata = {
               name: pdfFileName,
+              originalName: req.file ? req.file.originalname : pdfFileName,
               content: line,
-              timestamp: new Date(),
+              timestamp: new Date().toISOString(),
               chunk_index: processedCount,
-              source_file: pdfFileName
+              source_file: pdfFileName,
+              fileSize: processedCount === 0 ? fileSize : undefined, // Only set on first chunk
+              chunkCount: processedCount === 0 ? splitContext.filter(l => l.trim()).length : undefined,
+              status: 'processed',
+              mimeType: 'application/pdf'
             };
             
-            if (useQdrant) {
-              // Store vector in Qdrant and metadata in MongoDB
-              const documentId = `doc_${Date.now()}_${processedCount}`;
-              const documentPointId = uuidv4();
-              
-              // Add to Qdrant with UUID
-              await qdrant.addDocument(documentPointId, embedding, documentMetadata);
-              
-              // Store minimal metadata in MongoDB (without embedding to save space)
-              await mongoCollection.insertOne({
-                ...documentMetadata,
-                qdrant_id: documentPointId,
-                document_id: documentId,
-                has_vector: true
-              });
-            } else {
-              // Fallback: store everything in MongoDB
-              await mongoCollection.insertOne({
-                ...documentMetadata,
-                embedding: embedding,
-                has_vector: false
-              });
-            }
+            const documentPointId = uuidv4();
+            
+            // Store everything in Qdrant
+            await qdrant.addDocument(documentPointId, embedding, documentMetadata);
             
             processedCount++;
             
@@ -206,11 +190,7 @@ router.post('/Load-document', upload.single('pdfFile'), async function(req, res,
       }
     }
     
-    await connection.close();
-    
-    const message = useQdrant 
-      ? `PDF "${pdfFileName}" parsed and saved successfully. ${processedCount} chunks stored in Qdrant + MongoDB.`
-      : `PDF "${pdfFileName}" parsed and saved successfully. ${processedCount} chunks stored in MongoDB only.`;
+    const message = `PDF "${pdfFileName}" parsed and saved successfully. ${processedCount} chunks stored in Qdrant.`;
     
     // Clean up uploaded file after processing (optional)
     if (req.file && fs.existsSync(pdfPath)) {
@@ -225,9 +205,19 @@ router.post('/Load-document', upload.single('pdfFile'), async function(req, res,
     res.status(200).json({
       success: true,
       message: message,
-      filename: pdfFileName,
+      data: {
+        id: uuidv4(),
+        filename: pdfFileName,
+        originalName: req.file ? req.file.originalname : pdfFileName,
+        size: fileSize,
+        mimeType: 'application/pdf',
+        uploadedAt: new Date(),
+        processedAt: new Date(),
+        status: 'processed',
+        chunkCount: processedCount
+      },
       chunks_processed: processedCount,
-      storage_type: useQdrant ? "hybrid" : "mongodb_only"
+      storage_type: "qdrant"
     });
     
   } catch (error) {
@@ -334,6 +324,7 @@ router.post("/conversation", async (req, res) => {
   try {
     let sessionId = req.body.sessionId;
     const message = req.body.message;
+    const selectedDocument = req.body.selectedDocument; // Optional document filter
     
     if (!message) {
       return res.status(400).json({ error: "Message is required" });
@@ -394,7 +385,9 @@ router.post("/conversation", async (req, res) => {
     }
 
     // Create embedding for the message
+    console.log('Creating embedding for message:', message);
     const messageVector = await createEmbedding(message);
+    console.log('Embedding created, vector length:', messageVector.length);
     
     // Store user message in Qdrant conversations collection with error handling
     const userMessagePointId = uuidv4();
@@ -411,14 +404,80 @@ router.post("/conversation", async (req, res) => {
       // Continue processing even if storage fails
     }
 
-    // Perform vector search on documents collection
+    // Perform vector search on documents collection with optional document filter
     let finalResult = [];
+    
     try {
-      const searchResults = await qdrant.search(messageVector, 10);
+      console.log('Selected document for search:', selectedDocument);
+      
+      // First, try an unfiltered search to verify basic functionality
+      console.log('Testing unfiltered search first...');
+      const testResults = await qdrant.search(messageVector, 3);
+      console.log(`Unfiltered search returned ${testResults.length} results`);
+      if (testResults.length > 0) {
+        console.log('Sample result fields:', Object.keys(testResults[0].metadata || {}));
+        console.log('Sample document_name:', testResults[0].document_name);
+        console.log('Sample name field:', testResults[0].metadata?.name);
+      }
+      
+      let searchResults;
+      if (selectedDocument) {
+        // Try filtering by document_name first
+        console.log('Performing filtered search for document:', selectedDocument);
+        searchResults = await qdrant.searchWithFilter(messageVector, { 
+          document_name: selectedDocument 
+        }, 10);
+        
+        // If no results found, try filtering by 'name' field as fallback
+        if (searchResults.length === 0) {
+          console.log('No results with document_name filter, trying name filter...');
+          // Create a custom filter for the 'name' field
+          const nameFilter = {
+            must: [
+              {
+                key: 'name',
+                match: { value: selectedDocument }
+              }
+            ]
+          };
+          searchResults = await qdrant.search(messageVector, 10, nameFilter);
+        }
+      } else {
+        // Use regular search for all documents
+        console.log('Performing unfiltered search across all documents');
+        searchResults = await qdrant.search(messageVector, 10);
+      }
+      
+      console.log(`Found ${searchResults.length} search results`);
+      
       finalResult = searchResults.map(doc => ({
         text: doc.content,
-        score: doc.score
+        score: doc.score,
+        documentName: doc.document_name || doc.metadata?.name || 'Unknown',
+        timestamp: doc.timestamp
       }));
+      
+      // If no results found and a document was selected, provide helpful message
+      if (finalResult.length === 0 && selectedDocument) {
+        return res.json({
+          sessionId: sessionId,
+          message: `I couldn't find relevant information about "${message}" in the selected document "${selectedDocument}". Please try rephrasing your question or select a different document.`,
+          context_documents: 0,
+          selectedDocument: selectedDocument,
+          search_type: 'qdrant_filtered'
+        });
+      }
+      
+      // If no results found and no document selected, suggest selecting a document
+      if (finalResult.length === 0) {
+        return res.json({
+          sessionId: sessionId,
+          message: "I couldn't find relevant information to answer your question. Please make sure you have uploaded documents and try selecting a specific document to search within.",
+          context_documents: 0,
+          search_type: 'qdrant'
+        });
+      }
+      
     } catch (qdrantError) {
       console.error("Qdrant search failed:", qdrantError);
       return res.status(500).json({
@@ -427,11 +486,8 @@ router.post("/conversation", async (req, res) => {
       });
     }
 
-    // Generate AI response using Google Generative AI
-    const { GoogleGenerativeAI } = require("@google/generative-ai");
-    const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
-    
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+    // Generate AI response using Ollama
+    const axios = require('axios');
     
     const contextText = finalResult.map(doc => doc.text).join("\n");
     const prompt = `You are a humble helper who can answer questions asked by users from the given context.
@@ -443,8 +499,13 @@ User Question: ${message}
 
 Please provide a helpful answer based on the context provided.`;
 
-    const result = await model.generateContent(prompt);
-    const chat = result.response.text();
+    const ollamaResponse = await axios.post('http://localhost:11434/api/generate', {
+      model: 'llama3.2', // You can change this to your preferred model
+      prompt: prompt,
+      stream: false
+    });
+    
+    const chat = ollamaResponse.data.response;
 
     // Store AI response in Qdrant conversations collection with error handling
     const aiResponseVector = await createEmbedding(chat);
@@ -466,7 +527,14 @@ Please provide a helpful answer based on the context provided.`;
       sessionId: sessionId,
       message: chat,
       context_documents: finalResult.length,
-      search_type: 'qdrant'
+      selectedDocument: selectedDocument,
+      sources: finalResult.map(doc => ({
+        documentName: doc.documentName,
+        relevanceScore: doc.score,
+        excerpt: doc.text.substring(0, 200) + (doc.text.length > 200 ? '...' : ''),
+        timestamp: doc.timestamp
+      })),
+      search_type: selectedDocument ? 'qdrant_filtered' : 'qdrant'
     });
     
   } catch (error) {
@@ -477,37 +545,119 @@ Please provide a helpful answer based on the context provided.`;
     });
   }
 })
+
+// Get all uploaded documents
+router.get('/documents', async function(req, res, next) {
+  try {
+    const qdrant = new QdrantService();
+    
+    // Check if Qdrant is available
+    const qdrantHealth = await qdrant.healthCheck();
+    if (qdrantHealth.status !== 'healthy') {
+      return res.status(503).json({ 
+        success: false,
+        error: "Qdrant service unavailable", 
+        message: "Document service is not available" 
+      });
+    }
+
+    const documents = await qdrant.getDocuments();
+    
+    res.json({
+      success: true,
+      data: documents,
+      count: documents.length
+    });
+    
+  } catch (error) {
+    console.error("Error fetching documents:", error);
+    res.status(500).json({ 
+      success: false,
+      error: "Failed to fetch documents", 
+      message: error.message 
+    });
+  }
+});
+
+// Get document details by name
+router.get('/documents/:name', async function(req, res, next) {
+  try {
+    const documentName = req.params.name;
+    const qdrant = new QdrantService();
+    
+    // Check if Qdrant is available
+    const qdrantHealth = await qdrant.healthCheck();
+    if (qdrantHealth.status !== 'healthy') {
+      return res.status(503).json({ 
+        success: false,
+        error: "Qdrant service unavailable", 
+        message: "Document service is not available" 
+      });
+    }
+
+    const documentInfo = await qdrant.getDocumentByName(documentName);
+    
+    if (!documentInfo) {
+      return res.status(404).json({ 
+        success: false,
+        error: "Document not found",
+        message: `Document with name ${documentName} not found` 
+      });
+    }
+    
+    res.json({
+      success: true,
+      data: documentInfo
+    });
+    
+  } catch (error) {
+    console.error("Error fetching document details:", error);
+    res.status(500).json({ 
+      success: false,
+      error: "Failed to fetch document details", 
+      message: error.message 
+    });
+  }
+});
+
 // Search route for full-text search
 router.get('/search', async function(req, res, next) {
   try {
     const query = req.query.q;
+    const limit = parseInt(req.query.limit) || 10;
+    
     if (!query) {
       return res.status(400).json({ error: "Query parameter 'q' is required" });
     }
     
-    const connection = await mongodb.MongoClient.connect(process.env.DB, {
-      serverSelectionTimeoutMS: 5000,
-      connectTimeoutMS: 10000,
-    });
+    const qdrant = new QdrantService();
     
-    const db = connection.db("rag_doc");
-    const collection = db.collection("documents");
+    // Check if Qdrant is available
+    const qdrantHealth = await qdrant.healthCheck();
+    if (qdrantHealth.status !== 'healthy') {
+      return res.status(503).json({ 
+        error: "Qdrant service unavailable", 
+        message: "Search service is not available" 
+      });
+    }
+
+    // Create embedding for the query
+    const queryEmbedding = await createEmbedding(query);
     
-    // Text search using MongoDB's text index
-    const searchResults = await collection.find(
-      { $text: { $search: query } },
-      { score: { $meta: "textScore" } }
-    )
-    .sort({ score: { $meta: "textScore" } })
-    .limit(10)
-    .toArray();
-    
-    await connection.close();
+    // Use basic vector search for text search
+    const searchResults = await qdrant.search(queryEmbedding, limit);
     
     res.json({
       query: query,
-      results: searchResults,
-      count: searchResults.length
+      results: searchResults.map(result => ({
+        id: result.id,
+        content: result.content,
+        score: result.score,
+        name: result.metadata?.document_name || 'Unknown',
+        timestamp: result.metadata?.timestamp
+      })),
+      count: searchResults.length,
+      searchType: "text"
     });
     
   } catch (error) {
@@ -523,45 +673,40 @@ router.get('/search', async function(req, res, next) {
 router.get('/similarity-search', async function(req, res, next) {
   try {
     const query = req.query.q;
+    const limit = parseInt(req.query.limit) || 10;
+    
     if (!query) {
       return res.status(400).json({ error: "Query parameter 'q' is required" });
     }
     
+    const qdrant = new QdrantService();
+    
+    // Check if Qdrant is available
+    const qdrantHealth = await qdrant.healthCheck();
+    if (qdrantHealth.status !== 'healthy') {
+      return res.status(503).json({ 
+        error: "Qdrant service unavailable", 
+        message: "Search service is not available" 
+      });
+    }
+
     // Create embedding for the query
     const queryEmbedding = await createEmbedding(query);
     
-    const connection = await mongodb.MongoClient.connect(process.env.DB, {
-      serverSelectionTimeoutMS: 5000,
-      connectTimeoutMS: 10000,
-    });
-    
-    const db = connection.db("rag_doc");
-    const collection = db.collection("documents");
-    
-    // Get all documents with embeddings for similarity calculation
-    const documents = await collection.find({ embedding: { $exists: true } }).toArray();
-    
-    // Calculate cosine similarity
-    const results = documents.map(doc => {
-      const similarity = calculateCosineSimilarity(queryEmbedding, doc.embedding);
-      return {
-        ...doc,
-        similarity: similarity
-      };
-    });
-    
-    // Sort by similarity score (highest first)
-    results.sort((a, b) => b.similarity - a.similarity);
-    
-    // Return top 10 results
-    const topResults = results.slice(0, 10);
-    
-    await connection.close();
+    // Use Qdrant for similarity search
+    const searchResults = await qdrant.search(queryEmbedding, limit);
     
     res.json({
       query: query,
-      results: topResults,
-      count: topResults.length
+      results: searchResults.map(result => ({
+        id: result.id,
+        content: result.content,
+        score: result.score,
+        name: result.metadata?.document_name || 'Unknown',
+        timestamp: result.metadata?.timestamp
+      })),
+      count: searchResults.length,
+      searchType: "similarity"
     });
     
   } catch (error) {

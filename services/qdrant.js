@@ -63,6 +63,11 @@ class QdrantService {
         payload: {
           content: metadata.content,
           document_name: metadata.name,
+          original_name: metadata.originalName || metadata.name,
+          file_size: metadata.fileSize || 0,
+          chunk_count: metadata.chunkCount || 1,
+          status: metadata.status || 'processed',
+          mime_type: metadata.mimeType || 'application/pdf',
           timestamp: metadata.timestamp || new Date().toISOString(),
           ...metadata
         }
@@ -337,6 +342,124 @@ class QdrantService {
       }));
     } catch (error) {
       console.error(`Error searching in collection ${collectionName}:`, error);
+      throw error;
+    }
+  }
+
+  // Get all documents with metadata
+  async getDocuments() {
+    try {
+      // Scroll through all points to get document metadata
+      const scrollResult = await this.client.scroll(this.collectionName, {
+        limit: 1000,
+        with_payload: true,
+        with_vector: false
+      });
+
+      const documents = new Map();
+      
+      scrollResult.points.forEach(point => {
+        const docName = point.payload.document_name;
+        if (!documents.has(docName)) {
+          documents.set(docName, {
+            id: point.id,
+            filename: docName,
+            originalName: point.payload.original_name || docName,
+            size: point.payload.file_size || 0,
+            mimeType: point.payload.mime_type || 'application/pdf',
+            uploadedAt: new Date(point.payload.timestamp),
+            status: point.payload.status || 'processed',
+            chunkCount: 1
+          });
+        } else {
+          // Increment chunk count
+          documents.get(docName).chunkCount++;
+        }
+      });
+
+      return Array.from(documents.values());
+    } catch (error) {
+      console.error('Error fetching documents from Qdrant:', error);
+      throw error;
+    }
+  }
+
+  // Get specific document details
+  async getDocumentByName(documentName) {
+    try {
+      const searchResult = await this.client.scroll(this.collectionName, {
+        filter: {
+          must: [
+            {
+              key: 'document_name',
+              match: { value: documentName }
+            }
+          ]
+        },
+        limit: 1000,
+        with_payload: true,
+        with_vector: false
+      });
+
+      if (searchResult.points.length === 0) {
+        return null;
+      }
+
+      const chunks = searchResult.points.map(point => ({
+        id: point.id,
+        content: point.payload.content,
+        timestamp: point.payload.timestamp
+      }));
+
+      const firstPoint = searchResult.points[0];
+      return {
+        id: firstPoint.id,
+        filename: documentName,
+        originalName: firstPoint.payload.original_name || documentName,
+        size: firstPoint.payload.file_size || 0,
+        mimeType: firstPoint.payload.mime_type || 'application/pdf',
+        uploadedAt: new Date(firstPoint.payload.timestamp),
+        status: firstPoint.payload.status || 'processed',
+        chunkCount: chunks.length,
+        chunks: chunks
+      };
+    } catch (error) {
+      console.error('Error fetching document details from Qdrant:', error);
+      throw error;
+    }
+  }
+
+  // Delete document by name
+  async deleteDocument(documentName) {
+    try {
+      const searchResult = await this.client.scroll(this.collectionName, {
+        filter: {
+          must: [
+            {
+              key: 'document_name',
+              match: { value: documentName }
+            }
+          ]
+        },
+        limit: 1000,
+        with_payload: false,
+        with_vector: false
+      });
+
+      if (searchResult.points.length === 0) {
+        return { success: false, message: 'Document not found' };
+      }
+
+      const pointIds = searchResult.points.map(point => point.id);
+      
+      await this.client.delete(this.collectionName, {
+        points: pointIds
+      });
+
+      console.log(`✅ Document ${documentName} deleted from Qdrant`);
+      return { success: true, deletedChunks: pointIds.length };
+    } catch (error) {
+      console.error('Error deleting document from Qdrant:', error);
       throw error;
     }
   }

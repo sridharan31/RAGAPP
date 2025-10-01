@@ -42,7 +42,7 @@ function simpleHash(str) {
 }
 
 // Generate a simple embedding vector
-function generateSimpleEmbedding(text, dimensions = 384) {
+function generateSimpleEmbedding(text, dimensions = 768) {
   const words = text.toLowerCase().split(/\s+/);
   const embedding = new Array(dimensions).fill(0);
   
