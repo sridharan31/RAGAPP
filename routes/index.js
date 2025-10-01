@@ -485,12 +485,16 @@ router.post("/conversation", async (req, res) => {
         message: "Unable to retrieve relevant documents"
       });
     }
-
-    // Generate AI response using Ollama
-    const axios = require('axios');
+ // Generate AI response using Google Generative AI
+    const { GoogleGenerativeAI } = require("@google/generative-ai");
+    const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
     
-    const contextText = finalResult.map(doc => doc.text).join("\n");
-    const prompt = `You are a humble helper who can answer questions asked by users from the given context.
+    const model = genAI.getGenerativeModel({ model: "gemini-flash-latest" });
+    // Generate AI response using Ollama
+//     const axios = require('axios');
+    
+     const contextText = finalResult.map(doc => doc.text).join("\n");
+     const prompt = `You are a humble helper who can answer questions asked by users from the given context.
 
 Context:
 ${contextText}
@@ -499,13 +503,16 @@ User Question: ${message}
 
 Please provide a helpful answer based on the context provided.`;
 
-    const ollamaResponse = await axios.post('http://localhost:11434/api/generate', {
-      model: 'llama3.2', // You can change this to your preferred model
-      prompt: prompt,
-      stream: false
-    });
+//     const ollamaResponse = await axios.post('http://localhost:11434/api/generate', {
+//       model: 'llama3.2', // You can change this to your preferred model
+//       prompt: prompt,
+//       stream: false
+//     });
     
-    const chat = ollamaResponse.data.response;
+//     const chat = ollamaResponse.data.response;
+
+    const result = await model.generateContent(prompt);
+    const chat = result.response.text();
 
     // Store AI response in Qdrant conversations collection with error handling
     const aiResponseVector = await createEmbedding(chat);
