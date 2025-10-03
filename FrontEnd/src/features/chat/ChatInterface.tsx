@@ -1,6 +1,8 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useChat } from '../../hooks/useChat';
 import { useDocuments } from '../../hooks/useDocuments';
+import { useSession } from '../../hooks/useSession';
+import SessionHistory from '../../components/common/SessionHistory';
 
 const ChatInterface: React.FC = () => {
   const [message, setMessage] = useState('');
@@ -11,8 +13,56 @@ const ChatInterface: React.FC = () => {
     messages, 
     isLoading, 
     error, 
-    sendMessage
+    sendMessage,
+    startNewSession,
+    loadSession,
+    sessionId
   } = useChat();
+
+  const {
+    currentSessionId,
+    createNewSession,
+    loadSessionHistory,
+    switchToSession,
+    error: sessionError
+  } = useSession();
+
+  // Handle session switching
+  const handleSessionSelect = async (selectedSessionId: string) => {
+    try {
+      await switchToSession(selectedSessionId);
+      const sessionMessages = await loadSessionHistory(selectedSessionId);
+      
+      // Convert session messages to chat messages format
+      const chatMessages = sessionMessages.map(msg => ({
+        id: msg.id,
+        role: msg.role,
+        content: msg.content,
+        timestamp: typeof msg.timestamp === 'string' ? new Date(msg.timestamp) : msg.timestamp,
+        metadata: {}
+      }));
+      
+      // Load the session into the chat
+      loadSession(selectedSessionId, chatMessages);
+    } catch (error) {
+      console.error('Error switching to session:', error);
+    }
+  };
+
+  const handleNewSession = () => {
+    startNewSession();
+    createNewSession();
+  };
+
+  // Handle document change - reset chat when document changes
+  const handleDocumentChange = (newDocument: string) => {
+    if (selectedDocument !== newDocument) {
+      setSelectedDocument(newDocument);
+      // Reset chat when document changes
+      startNewSession();
+      createNewSession();
+    }
+  };
   
   const { 
     documents = [], 
@@ -54,6 +104,16 @@ const ChatInterface: React.FC = () => {
 
   return (
     <div className="h-full flex flex-col bg-white">
+      {/* Session History */}
+      <div className="border-b border-gray-100">
+        <SessionHistory
+          currentSessionId={currentSessionId || sessionId || undefined}
+          onSessionSelect={handleSessionSelect}
+          onNewSession={handleNewSession}
+          className="mx-4 my-2"
+        />
+      </div>
+
       {/* Simple Header */}
       <div className="border-b border-gray-200 px-4 py-3">
         <div className="flex items-center justify-between">
@@ -68,7 +128,7 @@ const ChatInterface: React.FC = () => {
               <select
                 id="document-select"
                 value={selectedDocument}
-                onChange={(e) => setSelectedDocument(e.target.value)}
+                onChange={(e) => handleDocumentChange(e.target.value)}
                 className="min-w-[200px] px-3 py-2 border border-gray-300 rounded-md text-sm bg-white shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:bg-gray-100 disabled:text-gray-500 appearance-none pr-8"
                 disabled={documentsLoading || safeDocuments.length === 0}
               >

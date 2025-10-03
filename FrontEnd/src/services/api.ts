@@ -81,11 +81,48 @@ class ApiService {
   }
 
   // Chat/Conversation endpoints
-  async sendMessage(request: ConversationRequest): Promise<ApiResponse<ConversationResponse>> {
+  async sendMessage(request: ConversationRequest & {limit?: number}): Promise<ApiResponse<ConversationResponse>> {
     return this.request<ConversationResponse>({
       method: 'POST',
       url: '/conversation',
-      data: request,
+      data: {
+        ...request,
+        limit: request.limit || 10, // Default limit for sources
+      },
+    });
+  }
+
+  // Session History endpoints
+  async getSessionHistory(sessionId?: string): Promise<ApiResponse<any[]>> {
+    const params = new URLSearchParams();
+    if (sessionId) {
+      params.append('sessionId', sessionId);
+    }
+    
+    return this.request<any[]>({
+      method: 'GET',
+      url: `/sessions/history?${params.toString()}`,
+    });
+  }
+
+  async getAllSessions(): Promise<ApiResponse<{sessions: {id: string, lastMessage: string, timestamp: Date, messageCount: number}[], total: number}>> {
+    return this.request<{sessions: {id: string, lastMessage: string, timestamp: Date, messageCount: number}[], total: number}>({
+      method: 'GET',
+      url: '/sessions',
+    });
+  }
+
+  async deleteSession(sessionId: string): Promise<ApiResponse<void>> {
+    return this.request<void>({
+      method: 'DELETE',
+      url: `/sessions/${sessionId}`,
+    });
+  }
+
+  async createNewSession(): Promise<ApiResponse<{sessionId: string}>> {
+    return this.request<{sessionId: string}>({
+      method: 'POST',
+      url: '/sessions/new',
     });
   }
 

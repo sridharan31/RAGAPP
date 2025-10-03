@@ -15,6 +15,8 @@ export interface UseChatReturn {
   error: AppError | null;
   sendMessage: (message: string, selectedDocument?: string) => Promise<void>;
   startNewSession: () => void;
+  loadSession: (sessionId: string, sessionMessages: ChatMessage[]) => void;
+  clearMessages: () => void;
   clearError: () => void;
 }
 
@@ -104,6 +106,22 @@ export const useChat = (): UseChatReturn => {
     setError(null);
   }, []);
 
+  const loadSession = useCallback((sessionId: string, sessionMessages: ChatMessage[]) => {
+    setMessages(sessionMessages);
+    setCurrentSession({
+      id: sessionId,
+      title: sessionMessages.length > 0 ? sessionMessages[0].content.substring(0, 50) + '...' : 'New Session',
+      messages: sessionMessages,
+      createdAt: sessionMessages.length > 0 ? sessionMessages[0].timestamp : new Date(),
+      updatedAt: sessionMessages.length > 0 ? sessionMessages[sessionMessages.length - 1].timestamp : new Date(),
+    });
+    setError(null);
+  }, []);
+
+  const clearMessages = useCallback(() => {
+    setMessages([]);
+  }, []);
+
   const clearError = useCallback(() => {
     setError(null);
   }, []);
@@ -116,6 +134,8 @@ export const useChat = (): UseChatReturn => {
     error,
     sendMessage,
     startNewSession,
+    loadSession,
+    clearMessages,
     clearError,
   };
 };

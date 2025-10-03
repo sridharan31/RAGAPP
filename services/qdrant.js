@@ -114,7 +114,7 @@ class QdrantService {
   }
 
   // Vector similarity search
-  async search(queryVector, limit = 10, filter = null) {
+  async search(queryVector, limit = 20, filter = null) {
     try {
       const searchParams = {
         vector: queryVector,
@@ -144,7 +144,7 @@ class QdrantService {
   }
 
   // Search with filters
-  async searchWithFilter(queryVector, filters = {}, limit = 10) {
+  async searchWithFilter(queryVector, filters = {}, limit = 20) {
     try {
       const filter = {};
       
@@ -314,7 +314,7 @@ class QdrantService {
   }
 
   // Search in specific collection with filters
-  async searchInCollection(collectionName, queryVector, limit = 10, filters = {}) {
+  async searchInCollection(collectionName, queryVector, limit = 20, filters = {}) {
     try {
       const searchParams = {
         vector: queryVector,
@@ -460,6 +460,108 @@ class QdrantService {
       return { success: true, deletedChunks: pointIds.length };
     } catch (error) {
       console.error('Error deleting document from Qdrant:', error);
+      throw error;
+    }
+  }
+
+  // Initialize sessions collection
+  async initializeSessionsCollection() {
+    try {
+      const collections = await this.client.getCollections();
+      const collectionExists = collections.collections.some(
+        col => col.name === 'sessions'
+      );
+
+      if (!collectionExists) {
+        console.log('Creating sessions collection');
+        await this.client.createCollection('sessions', {
+          vectors: {
+            size: 384, // Simple embedding for session metadata
+            distance: 'Cosine',
+          },
+          optimizers_config: {
+            default_segment_number: 2,
+          },
+          replication_factor: 1,
+        });
+
+        // Create indexes for sessions
+        await this.client.createPayloadIndex('sessions', {
+          field_name: 'sessionId',
+          field_schema: 'keyword',
+        });
+
+        await this.client.createPayloadIndex('sessions', {
+          field_name: 'timestamp',
+          field_schema: 'datetime',
+        });
+
+        console.log('✅ Sessions collection created successfully');
+      } else {
+        console.log('Sessions collection already exists');
+      }
+    } catch (error) {
+      console.error('Error creating sessions collection:', error);
+      throw error;
+    }
+  }
+
+  // Initialize conversations collection
+  async initializeConversationsCollection() {
+    try {
+      const collections = await this.client.getCollections();
+      const collectionExists = collections.collections.some(
+        col => col.name === 'conversations'
+      );
+
+      if (!collectionExists) {
+        console.log('Creating conversations collection');
+        await this.client.createCollection('conversations', {
+          vectors: {
+            size: 384, // Simple embedding for conversation metadata
+            distance: 'Cosine',
+          },
+          optimizers_config: {
+            default_segment_number: 2,
+          },
+          replication_factor: 1,
+        });
+
+        // Create indexes for conversations
+        await this.client.createPayloadIndex('conversations', {
+          field_name: 'sessionId',
+          field_schema: 'keyword',
+        });
+
+        await this.client.createPayloadIndex('conversations', {
+          field_name: 'messageId',
+          field_schema: 'keyword',
+        });
+
+        await this.client.createPayloadIndex('conversations', {
+          field_name: 'timestamp',
+          field_schema: 'datetime',
+        });
+
+        console.log('✅ Conversations collection created successfully');
+      } else {
+        console.log('Conversations collection already exists');
+      }
+    } catch (error) {
+      console.error('Error creating conversations collection:', error);
+      throw error;
+    }
+  }
+
+  // Initialize all collections
+  async initializeAllCollections() {
+    try {
+      await this.initializeCollection(); // documents_vectors
+      await this.initializeSessionsCollection(); // sessions
+      await this.initializeConversationsCollection(); // conversations
+      console.log('✅ All collections initialized successfully');
+    } catch (error) {
+      console.error('Error initializing collections:', error);
       throw error;
     }
   }
