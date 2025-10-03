@@ -3,11 +3,12 @@ import { useAppContext } from '../providers/AppProvider';
 import ChatInterface from '../features/chat/ChatInterface';
 import DocumentManager from '../features/documents/DocumentManager';
 import SearchInterface from '../features/search/SearchInterface';
+import SettingsPage from '../pages/SettingsPage';
 import Sidebar from '../components/common/Sidebar';
 import Header from '../components/common/Header';
 import ErrorBoundary from '../components/common/ErrorBoundary';
 
-type ActiveTab = 'chat' | 'search' | 'documents';
+type ActiveTab = 'chat' | 'search' | 'documents' | 'settings';
 
 const MainLayout: React.FC = () => {
   const { state } = useAppContext();
@@ -22,6 +23,8 @@ const MainLayout: React.FC = () => {
         return <SearchInterface />;
       case 'documents':
         return <DocumentManager />;
+      case 'settings':
+        return <SettingsPage />;
       default:
         return <ChatInterface />;
     }

@@ -2,7 +2,19 @@
 const express = require('express');
 const router = express.Router();
 const mongodb = require("mongodb");
-const createEmbedding = require("./embedings");
+const { createEmbeddingWithProvider } = require("./embedings");
+
+// Import AI provider functions with fallback handling
+let getActiveProvider, getProviderConfig;
+try {
+  const aiProviders = require('./ai-providers');
+  getActiveProvider = aiProviders.getActiveProvider;
+  getProviderConfig = aiProviders.getProviderConfig;
+} catch (error) {
+  console.warn('AI providers module not found, using default embedding provider');
+  getActiveProvider = () => 'google';
+  getProviderConfig = () => null;
+}
 
 // MongoDB Atlas Vector Search route
 router.get('/vector-search', async function(req, res, next) {
@@ -14,8 +26,10 @@ router.get('/vector-search', async function(req, res, next) {
       return res.status(400).json({ error: "Query parameter 'q' is required" });
     }
     
-    // Create embedding for the query
-    const queryEmbedding = await createEmbedding(query);
+    // Create embedding for the query using selected AI provider
+    const activeProvider = getActiveProvider();
+    const providerConfig = getProviderConfig(activeProvider);
+    const queryEmbedding = await createEmbeddingWithProvider(query, activeProvider, providerConfig);
     
     const connection = await mongodb.MongoClient.connect(process.env.DB, {
       serverSelectionTimeoutMS: 5000,
@@ -77,8 +91,10 @@ router.get('/hybrid-search', async function(req, res, next) {
       return res.status(400).json({ error: "Query parameter 'q' is required" });
     }
     
-    // Create embedding for the query
-    const queryEmbedding = await createEmbedding(query);
+    // Create embedding for the query using selected AI provider
+    const activeProvider = getActiveProvider();
+    const providerConfig = getProviderConfig(activeProvider);
+    const queryEmbedding = await createEmbeddingWithProvider(query, activeProvider, providerConfig);
     
     const connection = await mongodb.MongoClient.connect(process.env.DB, {
       serverSelectionTimeoutMS: 5000,
@@ -179,8 +195,10 @@ router.get('/filtered-vector-search', async function(req, res, next) {
       return res.status(400).json({ error: "Query parameter 'q' is required" });
     }
     
-    // Create embedding for the query
-    const queryEmbedding = await createEmbedding(query);
+    // Create embedding for the query using selected AI provider
+    const activeProvider = getActiveProvider();
+    const providerConfig = getProviderConfig(activeProvider);
+    const queryEmbedding = await createEmbeddingWithProvider(query, activeProvider, providerConfig);
     
     const connection = await mongodb.MongoClient.connect(process.env.DB, {
       serverSelectionTimeoutMS: 5000,

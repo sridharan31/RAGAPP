@@ -1,7 +1,19 @@
 var express = require('express');
 var router = express.Router();
-const createEmbedding = require("./embedings");
+const { createEmbeddingWithProvider } = require("./embedings");
 const QdrantService = require("../services/qdrant");
+
+// Import AI provider functions with fallback handling
+let getActiveProvider, getProviderConfig;
+try {
+  const aiProviders = require('./ai-providers');
+  getActiveProvider = aiProviders.getActiveProvider;
+  getProviderConfig = aiProviders.getProviderConfig;
+} catch (error) {
+  console.warn('AI providers module not found, using default embedding provider');
+  getActiveProvider = () => 'google';
+  getProviderConfig = () => null;
+}
 const { v4: uuidv4 } = require('uuid');
 const multer = require('multer');
 const axios = require('axios');
@@ -27,18 +39,36 @@ const storage = multer.diskStorage({
   }
 });
 
+// Import the new document processor
+const DocumentProcessor = require('../services/documentProcessor');
+const docProcessor = new DocumentProcessor();
+
 const upload = multer({ 
   storage: storage,
   fileFilter: function (req, file, cb) {
-    // Only allow PDF files
-    if (file.mimetype === 'application/pdf') {
+    // Allow multiple file formats
+    const allowedMimeTypes = [
+      'application/pdf',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document', // .docx
+      'application/msword', // .doc
+      'text/plain', // .txt
+      'text/markdown', // .md
+      'application/vnd.openxmlformats-officedocument.presentationml.presentation', // .pptx
+      'application/vnd.ms-powerpoint', // .ppt
+      'text/csv', // .csv
+      'application/csv', // .csv
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', // .xlsx
+      'application/vnd.ms-excel' // .xls
+    ];
+    
+    if (allowedMimeTypes.includes(file.mimetype)) {
       cb(null, true);
     } else {
-      cb(new Error('Only PDF files are allowed!'), false);
+      cb(new Error('Unsupported file format. Supported formats: PDF, DOCX, DOC, TXT, MD, PPTX, PPT, CSV, XLSX, XLS'), false);
     }
   },
   limits: {
-    fileSize: 10 * 1024 * 1024 // 10MB limit
+    fileSize: 25 * 1024 * 1024 // Increased to 25MB limit for larger documents
   }
 });
 
@@ -89,46 +119,79 @@ const parsePDF = (filePath) => {
     pdfParser.loadPDF(filePath);
   });
 };
-router.post('/Load-document', upload.single('pdfFile'), async function(req, res, next) {
+// Add endpoint to get supported formats
+router.get('/supported-formats', (req, res) => {
+  const formats = docProcessor.getSupportedFormats();
+  res.json({
+    success: true,
+    data: formats
+  });
+});
+
+router.post('/Load-document', upload.single('documentFile'), async function(req, res, next) {
   try {
-    let pdfPath;
-    let pdfFileName;
+    let filePath;
+    let fileName;
+    let mimeType;
     
     // Check if file was uploaded or use default path
     if (req.file) {
       // Use uploaded file
-      pdfPath = req.file.path;
-      pdfFileName = req.file.originalname;
-      console.log('Processing uploaded file:', pdfFileName);
+      filePath = req.file.path;
+      fileName = req.file.originalname;
+      mimeType = req.file.mimetype;
+      console.log(`Processing uploaded ${docProcessor.getFormatInfo(mimeType)?.description || 'file'}:`, fileName);
     } else if (req.body.useDefault === 'true') {
       // Use default file if explicitly requested
-      pdfPath = path.join(__dirname, '../doc/Motor-Vehicle-Insurance.pdf');
-      pdfFileName = 'Motor-Vehicle-Insurance.pdf';
-      console.log('Processing default file:', pdfFileName);
+      filePath = path.join(__dirname, '../doc/Motor-Vehicle-Insurance.pdf');
+      fileName = 'Motor-Vehicle-Insurance.pdf';
+      mimeType = 'application/pdf';
+      console.log('Processing default file:', fileName);
     } else {
       return res.status(400).json({
         error: "No file uploaded",
-        message: "Please upload a PDF file or set 'useDefault' to 'true' to use the default document"
+        message: "Please upload a document file or set 'useDefault' to 'true' to use the default document"
       });
     }
 
     // Check if file exists
-    if (!fs.existsSync(pdfPath)) {
+    if (!fs.existsSync(filePath)) {
       return res.status(404).json({
         error: "File not found",
-        message: `The file ${pdfFileName} does not exist`
+        message: `The file ${fileName} does not exist`
       });
     }
 
-    const pdfText = await parsePDF(pdfPath);
+    // Check if format is supported
+    if (!docProcessor.isFormatSupported(mimeType)) {
+      return res.status(400).json({
+        error: "Unsupported file format",
+        message: `File format ${mimeType} is not supported`,
+        supportedFormats: docProcessor.getSupportedFormats()
+      });
+    }
+
+    // Get file size
+    const stats = fs.statSync(filePath);
+    const fileSize = stats.size;
+    
+    // Process document using the new processor
+    const processingResult = await docProcessor.processDocument(filePath, fileName, mimeType);
+    const documentText = processingResult.text;
     
     // Write extracted text to file
-    await fs.writeFileSync("./context.txt", pdfText);
-    console.log("Extracted text from PDF:", pdfText.substring(0, 200));
+    await fs.writeFileSync("./context.txt", documentText);
+    console.log(`Extracted text from ${docProcessor.getFormatInfo(mimeType).description}:`, documentText.substring(0, 200));
     
-    // Split text into chunks
-    const context = await fs.readFileSync("./context.txt", "utf-8");
-    const splitContext = context.split("\n").filter(line => line.trim().length > 0);
+    // Use intelligent chunking
+    const chunks = await docProcessor.intelligentChunking(documentText, fileName);
+    console.log(`Document split into ${chunks.length} intelligent chunks`);
+    
+    // Generate AI-powered summary and keywords
+    const [summary, keywords] = await Promise.all([
+      docProcessor.generateDocumentSummary(documentText, fileName, mimeType),
+      docProcessor.extractKeywords(documentText, fileName)
+    ]);
     
     // Initialize Qdrant service
     const qdrant = new QdrantService();
@@ -148,29 +211,35 @@ router.post('/Load-document', upload.single('pdfFile'), async function(req, res,
     
     let processedCount = 0;
     const batchSize = 5; // Process in smaller batches
-    const fileSize = pdfText.length;
+    const textLength = documentText.length;
     
-    for (let i = 0; i < splitContext.length; i += batchSize) {
-      const batch = splitContext.slice(i, i + batchSize);
+    for (let i = 0; i < chunks.length; i += batchSize) {
+      const batch = chunks.slice(i, i + batchSize);
       
-      for (const line of batch) {
-        if (line.trim()) {
+      for (const chunk of batch) {
+        if (chunk.trim()) {
           try {
-            // Create embedding
-            const embedding = await createEmbedding(line);
+            // Create embedding using selected AI provider
+            const activeProvider = getActiveProvider();
+            const providerConfig = getProviderConfig(activeProvider);
+            const embedding = await createEmbeddingWithProvider(chunk, activeProvider, providerConfig);
             
-            // Create document metadata
+            // Enhanced document metadata with AI insights
             const documentMetadata = {
-              name: pdfFileName,
-              originalName: req.file ? req.file.originalname : pdfFileName,
-              content: line,
+              name: fileName,
+              originalName: req.file ? req.file.originalname : fileName,
+              content: chunk,
               timestamp: new Date().toISOString(),
               chunk_index: processedCount,
-              source_file: pdfFileName,
+              source_file: fileName,
               fileSize: processedCount === 0 ? fileSize : undefined, // Only set on first chunk
-              chunkCount: processedCount === 0 ? splitContext.filter(l => l.trim()).length : undefined,
+              chunkCount: processedCount === 0 ? chunks.length : undefined,
               status: 'processed',
-              mimeType: 'application/pdf'
+              mimeType: mimeType,
+              documentMetadata: processedCount === 0 ? processingResult.metadata : undefined,
+              summary: processedCount === 0 ? summary : undefined,
+              keywords: processedCount === 0 ? keywords : undefined,
+              processedBy: getActiveProvider()
             };
             
             const documentPointId = uuidv4();
@@ -190,13 +259,14 @@ router.post('/Load-document', upload.single('pdfFile'), async function(req, res,
       }
     }
     
-    const message = `PDF "${pdfFileName}" parsed and saved successfully. ${processedCount} chunks stored in Qdrant.`;
+    const formatInfo = docProcessor.getFormatInfo(mimeType);
+    const message = `${formatInfo.description} "${fileName}" processed and saved successfully. ${processedCount} chunks stored in Qdrant.`;
     
     // Clean up uploaded file after processing (optional)
-    if (req.file && fs.existsSync(pdfPath)) {
+    if (req.file && fs.existsSync(filePath)) {
       try {
-        fs.unlinkSync(pdfPath);
-        console.log('Uploaded file cleaned up:', pdfPath);
+        fs.unlinkSync(filePath);
+        console.log('Uploaded file cleaned up:', filePath);
       } catch (cleanupError) {
         console.warn('Failed to clean up uploaded file:', cleanupError.message);
       }
@@ -207,17 +277,23 @@ router.post('/Load-document', upload.single('pdfFile'), async function(req, res,
       message: message,
       data: {
         id: uuidv4(),
-        filename: pdfFileName,
-        originalName: req.file ? req.file.originalname : pdfFileName,
+        filename: fileName,
+        originalName: req.file ? req.file.originalname : fileName,
         size: fileSize,
-        mimeType: 'application/pdf',
+        mimeType: mimeType,
         uploadedAt: new Date(),
         processedAt: new Date(),
         status: 'processed',
-        chunkCount: processedCount
+        chunkCount: processedCount,
+        documentType: formatInfo.description,
+        metadata: processingResult.metadata,
+        summary: summary,
+        keywords: keywords,
+        processedBy: getActiveProvider()
       },
       chunks_processed: processedCount,
-      storage_type: "qdrant"
+      storage_type: "qdrant",
+      ai_provider: getActiveProvider()
     });
     
   } catch (error) {
@@ -234,9 +310,10 @@ router.post('/Load-document', upload.single('pdfFile'), async function(req, res,
     }
     
     res.status(500).json({
-      error: "Failed to load or parse PDF",
+      error: "Failed to load or parse document",
       message: error.message,
-      filename: req.file ? req.file.originalname : 'unknown'
+      filename: req.file ? req.file.originalname : 'unknown',
+      supportedFormats: docProcessor.getSupportedFormats()
     });
   }
 });
@@ -271,7 +348,9 @@ pdfParser.on("pdfParser_dataReady", async (data) => {
 router.get('/embeddings', async function(req, res, next) {
   try {
     const text = req.query.text;
-    const embedding = await createEmbedding(text);
+    const activeProvider = getActiveProvider();
+    const providerConfig = getProviderConfig(activeProvider);
+    const embedding = await createEmbeddingWithProvider(text, activeProvider, providerConfig);
     res.json({ embedding });
   } catch (error) {
     console.error("Error creating embedding:", error);
@@ -384,9 +463,11 @@ router.post("/conversation", async (req, res) => {
       }
     }
 
-    // Create embedding for the message
+    // Create embedding for the message using selected AI provider
     console.log('Creating embedding for message:', message);
-    const messageVector = await createEmbedding(message);
+    const activeProvider = getActiveProvider();
+    const providerConfig = getProviderConfig(activeProvider);
+    const messageVector = await createEmbeddingWithProvider(message, activeProvider, providerConfig);
     console.log('Embedding created, vector length:', messageVector.length);
     
     // Store user message in Qdrant conversations collection with error handling
@@ -424,6 +505,9 @@ router.post("/conversation", async (req, res) => {
       if (selectedDocument) {
         // Try filtering by document_name first
         console.log('Performing filtered search for document:', selectedDocument);
+        console.log('Message vector length:', messageVector.length);
+        console.log('Available documents from earlier test:', testResults.map(r => r.document_name).slice(0, 5));
+        
         searchResults = await qdrant.searchWithFilter(messageVector, { 
           document_name: selectedDocument 
         }, 10);
@@ -485,37 +569,14 @@ router.post("/conversation", async (req, res) => {
         message: "Unable to retrieve relevant documents"
       });
     }
- // Generate AI response using Google Generative AI
-    const { GoogleGenerativeAI } = require("@google/generative-ai");
-    const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
+ // Generate AI response using the selected provider
+    const { generateAIResponse } = require('./ai-providers');
     
-    const model = genAI.getGenerativeModel({ model: "gemini-flash-latest" });
-    // Generate AI response using Ollama
-//     const axios = require('axios');
-    
-     const contextText = finalResult.map(doc => doc.text).join("\n");
-     const prompt = `You are a humble helper who can answer questions asked by users from the given context.
-
-Context:
-${contextText}
-
-User Question: ${message}
-
-Please provide a helpful answer based on the context provided.`;
-
-//     const ollamaResponse = await axios.post('http://localhost:11434/api/generate', {
-//       model: 'llama3.2', // You can change this to your preferred model
-//       prompt: prompt,
-//       stream: false
-//     });
-    
-//     const chat = ollamaResponse.data.response;
-
-    const result = await model.generateContent(prompt);
-    const chat = result.response.text();
+    const contextText = finalResult.map(doc => doc.text).join("\n");
+    const chat = await generateAIResponse(message, contextText);
 
     // Store AI response in Qdrant conversations collection with error handling
-    const aiResponseVector = await createEmbedding(chat);
+    const aiResponseVector = await createEmbeddingWithProvider(chat, activeProvider, providerConfig);
     const aiMessagePointId = uuidv4();
     try {
       await qdrant.addDocumentToCollection("conversations", aiMessagePointId, aiResponseVector, {
@@ -648,8 +709,10 @@ router.get('/search', async function(req, res, next) {
       });
     }
 
-    // Create embedding for the query
-    const queryEmbedding = await createEmbedding(query);
+    // Create embedding for the query using selected AI provider
+    const activeProvider = getActiveProvider();
+    const providerConfig = getProviderConfig(activeProvider);
+    const queryEmbedding = await createEmbeddingWithProvider(query, activeProvider, providerConfig);
     
     // Use basic vector search for text search
     const searchResults = await qdrant.search(queryEmbedding, limit);
@@ -697,8 +760,10 @@ router.get('/similarity-search', async function(req, res, next) {
       });
     }
 
-    // Create embedding for the query
-    const queryEmbedding = await createEmbedding(query);
+    // Create embedding for the query using selected AI provider
+    const activeProvider = getActiveProvider();
+    const providerConfig = getProviderConfig(activeProvider);
+    const queryEmbedding = await createEmbeddingWithProvider(query, activeProvider, providerConfig);
     
     // Use Qdrant for similarity search
     const searchResults = await qdrant.search(queryEmbedding, limit);
@@ -769,8 +834,10 @@ router.get('/qdrant-search', async function(req, res, next) {
       });
     }
     
-    // Create embedding for the query
-    const queryVector = await createEmbedding(query);
+    // Create embedding for the query using selected AI provider
+    const activeProvider = getActiveProvider();
+    const providerConfig = getProviderConfig(activeProvider);
+    const queryVector = await createEmbeddingWithProvider(query, activeProvider, providerConfig);
     
     // Perform vector search
     const results = await qdrant.search(queryVector, limit);
@@ -815,8 +882,10 @@ router.get('/qdrant-filtered-search', async function(req, res, next) {
       });
     }
     
-    // Create embedding for the query
-    const queryVector = await createEmbedding(query);
+    // Create embedding for the query using selected AI provider
+    const activeProvider = getActiveProvider();
+    const providerConfig = getProviderConfig(activeProvider);
+    const queryVector = await createEmbeddingWithProvider(query, activeProvider, providerConfig);
     
     // Build filters
     const filters = {};
@@ -862,6 +931,212 @@ router.get('/qdrant-health', async function(req, res, next) {
   } catch (error) {
     res.status(503).json({ 
       status: 'error', 
+      message: error.message 
+    });
+  }
+});
+
+// Get uploaded files
+router.get('/uploaded-files', async function(req, res, next) {
+  try {
+    const qdrant = new QdrantService();
+    
+    const fileMap = new Map();
+    let searchResults = [];
+
+    // Try to get documents from Qdrant first
+    try {
+      const qdrantHealth = await qdrant.healthCheck();
+      console.log('Qdrant health check:', qdrantHealth);
+      if (qdrantHealth.status === 'healthy') {
+        const qdrantDocuments = await qdrant.getDocuments();
+        console.log('Qdrant documents found:', qdrantDocuments.length);
+        
+        // Add Qdrant documents to the file map
+        qdrantDocuments.forEach(doc => {
+          fileMap.set(doc.filename, {
+            id: doc.filename,
+            name: doc.filename, // Use filename as name
+            originalName: doc.originalName,
+            type: doc.mimeType, // Map mimeType to type
+            size: doc.size || 0,
+            uploadedAt: doc.uploadedAt,
+            chunkCount: doc.chunkCount || 0,
+            summary: doc.summary || '',
+            keywords: doc.keywords || [],
+            status: 'processed',
+            processedBy: doc.processedBy || 'Unknown'
+          });
+        });
+      }
+    } catch (qdrantError) {
+      console.log('Qdrant not available or getDocuments failed:', qdrantError.message);
+      console.error('Qdrant error details:', qdrantError);
+    }
+
+    // Also check physical files in uploads directory
+    try {
+      const fs = require('fs');
+      const path = require('path');
+      const uploadsDir = path.join(__dirname, '..', 'uploads');
+      
+      if (fs.existsSync(uploadsDir)) {
+        const uploadedFiles = fs.readdirSync(uploadsDir);
+        
+        uploadedFiles.forEach(filename => {
+          // Extract original filename (remove timestamp prefix)
+          const originalName = filename.replace(/^\d+-\d+-/, '');
+          
+          if (!fileMap.has(originalName)) {
+            const filePath = path.join(uploadsDir, filename);
+            const stats = fs.statSync(filePath);
+            
+            // Determine file type from extension
+            const ext = path.extname(originalName).toLowerCase();
+            let mimeType = 'application/octet-stream';
+            
+            const mimeTypes = {
+              '.pdf': 'application/pdf',
+              '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+              '.doc': 'application/msword',
+              '.txt': 'text/plain',
+              '.md': 'text/markdown',
+              '.csv': 'text/csv',
+              '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+              '.xls': 'application/vnd.ms-excel',
+              '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+              '.ppt': 'application/vnd.ms-powerpoint'
+            };
+            
+            mimeType = mimeTypes[ext] || mimeType;
+            
+            fileMap.set(originalName, {
+              id: originalName,
+              name: originalName,
+              type: mimeType,
+              size: stats.size,
+              uploadedAt: stats.birthtime || stats.mtime,
+              chunkCount: 0, // Unknown, as it's not in Qdrant
+              summary: '',
+              keywords: [],
+              status: 'uploaded' // File exists but may not be processed in Qdrant
+            });
+          }
+        });
+      }
+    } catch (fileError) {
+      console.log("Error reading uploads directory:", fileError.message);
+    }
+
+    // Convert map to array
+    const filesArray = Array.from(fileMap.values());
+    
+    console.log('Final files array:', filesArray.length, 'documents');
+    console.log('File names:', filesArray.map(f => f.name));
+    
+    res.json({
+      files: filesArray,
+      total: filesArray.length
+    });
+    
+  } catch (error) {
+    console.error("Error getting uploaded files:", error);
+    res.status(500).json({ 
+      error: "Failed to retrieve files", 
+      message: error.message 
+    });
+  }
+});
+
+// Delete uploaded file
+router.delete('/uploaded-files/:fileId', async function(req, res, next) {
+  try {
+    const fileId = req.params.fileId;
+    
+    if (!fileId) {
+      return res.status(400).json({ error: "File ID is required" });
+    }
+
+    const qdrant = new QdrantService();
+    
+    // Check if Qdrant is available
+    const qdrantHealth = await qdrant.healthCheck();
+    if (qdrantHealth.status !== 'healthy') {
+      return res.status(503).json({ 
+        error: "Qdrant service unavailable", 
+        message: "File deletion service is not available" 
+      });
+    }
+
+    // Search for all chunks of this document
+    const searchResults = await qdrant.searchInCollection(
+      qdrant.collectionName,
+      new Array(768).fill(0), // Dummy vector
+      1000, // Get many results
+      { 
+        "document_name": fileId
+      },
+      0.0 // Very low threshold
+    );
+
+    if (searchResults.length === 0) {
+      return res.status(404).json({ 
+        error: "File not found",
+        message: `No document found with name: ${fileId}`
+      });
+    }
+
+    // Delete all points for this document
+    const pointIds = searchResults.map(result => result.id);
+    
+    // Delete points in batches
+    const batchSize = 100;
+    let deletedCount = 0;
+    
+    for (let i = 0; i < pointIds.length; i += batchSize) {
+      const batch = pointIds.slice(i, i + batchSize);
+      try {
+        await qdrant.deletePoints(qdrant.collectionName, batch);
+        deletedCount += batch.length;
+        console.log(`Deleted batch of ${batch.length} points for document: ${fileId}`);
+      } catch (error) {
+        console.error(`Failed to delete batch starting at index ${i}:`, error);
+      }
+    }
+
+    // Also try to delete the physical file if it exists
+    try {
+      const fs = require('fs');
+      const path = require('path');
+      const uploadsDir = path.join(__dirname, '..', 'uploads');
+      
+      // Find files that match the document name
+      if (fs.existsSync(uploadsDir)) {
+        const files = fs.readdirSync(uploadsDir);
+        const matchingFiles = files.filter(file => file.includes(fileId));
+        
+        for (const file of matchingFiles) {
+          const filePath = path.join(uploadsDir, file);
+          if (fs.existsSync(filePath)) {
+            fs.unlinkSync(filePath);
+            console.log(`Deleted physical file: ${filePath}`);
+          }
+        }
+      }
+    } catch (fileError) {
+      console.warn(`Could not delete physical file for ${fileId}:`, fileError.message);
+    }
+
+    res.json({
+      message: `Document "${fileId}" deleted successfully`,
+      deletedChunks: deletedCount,
+      documentName: fileId
+    });
+    
+  } catch (error) {
+    console.error("Error deleting file:", error);
+    res.status(500).json({ 
+      error: "Failed to delete file", 
       message: error.message 
     });
   }

@@ -4,15 +4,19 @@ import { useDocuments } from '../../hooks/useDocuments';
 import ChatBubble from '../../components/chat/ChatBubble';
 import DocumentSidebar from '../../components/documents/DocumentSidebar';
 import FileUpload from '../../components/upload/FileUpload';
+import AIProviderSelector from '../../components/ai/AIProviderSelector';
 import Button from '../../components/ui/Button';
 import Card from '../../components/ui/Card';
 import Tooltip from '../../components/ui/Tooltip';
+import type { AIProviderType } from '../../types';
 
 const ModernChatInterface: React.FC = () => {
   const [message, setMessage] = useState('');
   const [selectedDocument, setSelectedDocument] = useState<string | null>(null);
   const [showUploadModal, setShowUploadModal] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [selectedAIProvider, setSelectedAIProvider] = useState<AIProviderType>('google'); // Used in handleProviderChange
+  const [showProviderSelector, setShowProviderSelector] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   
@@ -85,6 +89,12 @@ const ModernChatInterface: React.FC = () => {
   const handleFeedback = (messageId: string, feedback: 'positive' | 'negative') => {
     // TODO: Implement feedback API call
     console.log('Feedback:', messageId, feedback);
+  };
+
+  const handleProviderChange = (provider: AIProviderType) => {
+    setSelectedAIProvider(provider);
+    // TODO: Notify backend about provider change
+    console.log('AI Provider changed to:', provider);
   };
 
   const quickPrompts = [
@@ -164,6 +174,18 @@ const ModernChatInterface: React.FC = () => {
                 </select>
               </div>
               
+              {/* AI Provider Button */}
+              <Tooltip content="Select AI Provider">
+                <button 
+                  onClick={() => setShowProviderSelector(!showProviderSelector)}
+                  className={`p-2 rounded-lg transition-colors ${showProviderSelector ? 'bg-purple-100 text-purple-600' : 'hover:bg-gray-100 text-gray-600'}`}
+                >
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+                  </svg>
+                </button>
+              </Tooltip>
+
               {/* Upload Button */}
               <Tooltip content="Upload new document">
                 <button 
@@ -179,6 +201,18 @@ const ModernChatInterface: React.FC = () => {
           </div>
         </div>
 
+        {/* AI Provider Selector Modal */}
+        {showProviderSelector && (
+          <div className="bg-white border-b border-gray-200 px-6 py-4">
+            <div className="max-w-2xl mx-auto">
+              <AIProviderSelector 
+                onProviderChange={handleProviderChange}
+                className="shadow-none border-0"
+              />
+            </div>
+          </div>
+        )}
+
         {/* Messages Area */}
         <div className="flex-1 overflow-y-auto">
           {safeDocuments.length === 0 ? (
@@ -191,7 +225,7 @@ const ModernChatInterface: React.FC = () => {
                 </div>
                 <h3 className="text-xl font-bold text-gray-900 mb-4">Welcome to AI Document Chat</h3>
                 <p className="text-gray-600 mb-6 leading-relaxed">
-                  Upload your first PDF document to start having intelligent conversations with your content.
+                  Upload your document (PDF, Word, PowerPoint, Text) to start having intelligent conversations with your content using AI.
                 </p>
                 <Button onClick={() => setShowUploadModal(true)}>
                   <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">

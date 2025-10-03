@@ -323,7 +323,7 @@ class QdrantService {
         with_vector: false
       };
 
-      if (Object.keys(filters).length > 0) {
+      if (filters && Object.keys(filters).length > 0) {
         searchParams.filter = {
           must: Object.entries(filters).map(([key, value]) => ({
             key: key,

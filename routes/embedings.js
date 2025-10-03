@@ -1,16 +1,30 @@
 // routes/embedings.js
 require("dotenv").config();
 
+// Import AI provider system
+let getActiveProvider = null;
+let getProviderConfig = null;
+
+try {
+  const aiProviders = require('./ai-providers');
+  getActiveProvider = aiProviders.getActiveProvider;
+  getProviderConfig = aiProviders.getProviderConfig;
+} catch (error) {
+  console.warn('AI provider system not available, using fallback embedding logic');
+}
+
 // Google GenAI embedding function using the example format you provided
-async function createGoogleEmbedding(contents) {
+async function createGoogleEmbedding(contents, config = null) {
   try {
     const { GoogleGenerativeAI } = require("@google/generative-ai");
     
-    if (!process.env.GOOGLE_API_KEY || process.env.GOOGLE_API_KEY === 'your_google_api_key_here') {
+    const apiKey = config ? config.apiKey : process.env.GOOGLE_API_KEY;
+    
+    if (!apiKey || apiKey === 'your_google_api_key_here') {
       throw new Error('Google API key not configured');
     }
     
-    const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
+    const genAI = new GoogleGenerativeAI(apiKey);
     const model = genAI.getGenerativeModel({ model: "text-embedding-004" });
     
     // Handle both single text and array of texts
@@ -62,9 +76,80 @@ function generateSimpleEmbedding(text, dimensions = 768) {
   return embedding.map(val => magnitude > 0 ? val / magnitude : 0);
 }
 
-async function createEmbedding(text) {
-  console.log(`Creating embedding for text: "${text}"`);
+// OpenAI embedding function
+async function createOpenAIEmbedding(text, config) {
+  const OpenAI = require("openai");
+  const client = new OpenAI({ apiKey: config.apiKey });
   
+  const response = await client.embeddings.create({
+    model: "text-embedding-3-small",
+    input: text,
+  });
+  
+  return response.data[0].embedding;
+}
+
+// Ollama embedding function (if available)
+async function createOllamaEmbedding(text, config) {
+  const axios = require('axios');
+  
+  try {
+    const response = await axios.post(`${config.baseUrl}/api/embeddings`, {
+      model: config.model || 'llama2', // Default embedding model
+      prompt: text
+    });
+    
+    return response.data.embedding || generateSimpleEmbedding(text);
+  } catch (error) {
+    console.warn(`Ollama embedding failed: ${error.message}, using simple embedding`);
+    return generateSimpleEmbedding(text);
+  }
+}
+
+// Provider-aware embedding creation
+async function createEmbeddingWithProvider(text, providerId = null, providerConfig = null) {
+  // Use specified provider or get active one
+  const activeProvider = providerId || (getActiveProvider ? getActiveProvider() : 'google');
+  const config = providerConfig || (getProviderConfig ? getProviderConfig(activeProvider) : null);
+  
+  console.log(`Creating embedding for text using ${activeProvider} provider: "${text.substring(0, 100)}..."`);
+  
+  try {
+    switch (activeProvider) {
+      case 'openai':
+        if (config && config.apiKey) {
+          const embedding = await createOpenAIEmbedding(text, config);
+          console.log(`OpenAI embedding created successfully, length: ${embedding.length}`);
+          return embedding;
+        }
+        break;
+        
+      case 'google':
+        if (config && config.apiKey) {
+          const embedding = await createGoogleEmbedding(text);
+          console.log(`Google GenAI embedding created successfully, length: ${embedding.length}`);
+          return embedding;
+        }
+        break;
+        
+      case 'ollama':
+        if (config && config.baseUrl) {
+          const embedding = await createOllamaEmbedding(text, config);
+          console.log(`Ollama embedding created successfully, length: ${embedding.length}`);
+          return embedding;
+        }
+        break;
+    }
+  } catch (error) {
+    console.warn(`${activeProvider} embedding failed: ${error.message}, trying fallback`);
+  }
+  
+  // Fallback logic - try other providers
+  console.log('Trying fallback embedding providers...');
+  return await createEmbeddingFallback(text);
+}
+
+async function createEmbeddingFallback(text) {
   // Try OpenAI first
   try {
     if (process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY.length > 10) {
@@ -77,11 +162,11 @@ async function createEmbedding(text) {
       });
       
       const embedding = response.data[0].embedding;
-      console.log(`OpenAI embedding created successfully, length: ${embedding.length}`);
+      console.log(`OpenAI fallback embedding created successfully, length: ${embedding.length}`);
       return embedding;
     }
   } catch (error) {
-    console.log(`OpenAI API failed: ${error.message}, trying Google GenAI...`);
+    console.log(`OpenAI fallback failed: ${error.message}, trying Google GenAI...`);
   }
   
   // Try Google GenAI as second option
@@ -94,18 +179,27 @@ async function createEmbedding(text) {
       const result = await model.embedContent(text);
       
       const embedding = result.embedding.values;
-      console.log(`Google GenAI embedding created successfully, length: ${embedding.length}`);
+      console.log(`Google GenAI fallback embedding created successfully, length: ${embedding.length}`);
       return embedding;
     }
   } catch (error) {
-    console.log(`Google GenAI API failed: ${error.message}, falling back to simple embedding`);
+    console.log(`Google GenAI fallback failed: ${error.message}, falling back to simple embedding`);
   }
   
-  // Fallback to simple embedding
+  // Final fallback to simple embedding
   const embedding = generateSimpleEmbedding(text);
   console.log(`Simple embedding created successfully, length: ${embedding.length}`);
   return embedding;
 }
 
+// Main embedding function (backward compatibility)
+async function createEmbedding(text) {
+  return await createEmbeddingWithProvider(text);
+}
+
 module.exports = createEmbedding;
+module.exports.createEmbeddingWithProvider = createEmbeddingWithProvider;
+module.exports.createGoogleEmbedding = createGoogleEmbedding;
+module.exports.createOpenAIEmbedding = createOpenAIEmbedding;
+module.exports.createOllamaEmbedding = createOllamaEmbedding;
 module.exports.createGoogleEmbedding = createGoogleEmbedding;

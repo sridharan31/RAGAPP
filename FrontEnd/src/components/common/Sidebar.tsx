@@ -1,8 +1,8 @@
 import React from 'react';
 
 interface SidebarProps {
-  activeTab: 'chat' | 'search' | 'documents';
-  onTabChange: (tab: 'chat' | 'search' | 'documents') => void;
+  activeTab: 'chat' | 'search' | 'documents' | 'settings';
+  onTabChange: (tab: 'chat' | 'search' | 'documents' | 'settings') => void;
   isOpen: boolean;
   onToggle: () => void;
 }
@@ -11,7 +11,8 @@ const Sidebar: React.FC<SidebarProps> = ({ activeTab, onTabChange, isOpen }) => 
   const tabs = [
     { id: 'chat' as const, label: 'AI Chat', icon: '🤖', description: 'Intelligent conversations' },
     { id: 'search' as const, label: 'Smart Search', icon: '🔍', description: 'Find anything instantly' },
-    { id: 'documents' as const, label: 'Documents', icon: '�', description: 'Manage your files' },
+    { id: 'documents' as const, label: 'Documents', icon: '📄', description: 'Manage your files' },
+    { id: 'settings' as const, label: 'Settings', icon: '⚙️', description: 'Configure AI providers' },
   ];
 
   if (!isOpen) return null;

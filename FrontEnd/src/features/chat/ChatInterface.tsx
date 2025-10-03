@@ -16,11 +16,20 @@ const ChatInterface: React.FC = () => {
   
   const { 
     documents = [], 
-    isLoading: documentsLoading
+    isLoading: documentsLoading,
+    error: documentsError
   } = useDocuments();
 
   // Ensure documents is always an array
   const safeDocuments = Array.isArray(documents) ? documents : [];
+  
+  // Debug log for documents
+  React.useEffect(() => {
+    console.log('Documents loaded:', safeDocuments);
+    console.log('Documents loading:', documentsLoading);
+    console.log('Documents error:', documentsError);
+    console.log('Selected document:', selectedDocument);
+  }, [safeDocuments, documentsLoading, documentsError, selectedDocument]);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -55,20 +64,35 @@ const ChatInterface: React.FC = () => {
             <label htmlFor="document-select" className="text-sm text-gray-600">
               Document:
             </label>
-            <select
-              id="document-select"
-              value={selectedDocument}
-              onChange={(e) => setSelectedDocument(e.target.value)}
-              className="px-2 py-1 border border-gray-300 rounded text-sm focus:outline-none focus:border-blue-500"
-              disabled={documentsLoading || safeDocuments.length === 0}
-            >
-              <option value="">All Documents</option>
-              {safeDocuments.map((doc) => (
-                <option key={doc.id} value={doc.filename}>
-                  {doc.originalName}
-                </option>
-              ))}
-            </select>
+            <div className="relative">
+              <select
+                id="document-select"
+                value={selectedDocument}
+                onChange={(e) => setSelectedDocument(e.target.value)}
+                className="min-w-[200px] px-3 py-2 border border-gray-300 rounded-md text-sm bg-white shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:bg-gray-100 disabled:text-gray-500 appearance-none pr-8"
+                disabled={documentsLoading || safeDocuments.length === 0}
+              >
+                {documentsLoading ? (
+                  <option value="">Loading documents...</option>
+                ) : safeDocuments.length === 0 ? (
+                  <option value="">No documents uploaded</option>
+                ) : (
+                  <>
+                    <option value="">All Documents ({safeDocuments.length})</option>
+                    {safeDocuments.map((doc) => (
+                      <option key={doc.id || doc.name} value={doc.name}>
+                        📄 {doc.name}
+                      </option>
+                    ))}
+                  </>
+                )}
+              </select>
+              <div className="absolute inset-y-0 right-0 flex items-center px-2 pointer-events-none">
+                <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                </svg>
+              </div>
+            </div>
           </div>
         </div>
       </div>

@@ -18,9 +18,11 @@
     "express": "~4.16.1",
     "http-errors": "~1.6.3",
     "jade": "~1.11.0",
+    "mammoth": "^1.11.0",
     "morgan": "~1.9.1",
     "multer": "^2.0.2",
     "node-fetch": "^3.3.2",
+    "officeparser": "^5.2.1",
     "openai": "^5.16.0",
     "pdf2json": "^3.2.0",
     "uuid": "^13.0.0"

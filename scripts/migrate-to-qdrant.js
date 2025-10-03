@@ -1,9 +1,21 @@
 // Migration script from MongoDB to Qdrant
 const { MongoClient } = require('mongodb');
 const QdrantService = require('../services/qdrant');
-const createEmbedding = require('../routes/embedings');
+const { createEmbeddingWithProvider } = require('../routes/embedings');
 const { randomUUID } = require('crypto');
 require('dotenv').config();
+
+// Import AI provider functions with fallback handling
+let getActiveProvider, getProviderConfig;
+try {
+  const aiProviders = require('../routes/ai-providers');
+  getActiveProvider = aiProviders.getActiveProvider;
+  getProviderConfig = aiProviders.getProviderConfig;
+} catch (error) {
+  console.warn('AI providers module not found, using default embedding provider');
+  getActiveProvider = () => 'google';
+  getProviderConfig = () => null;
+}
 
 async function migrateToQdrant() {
   const qdrant = new QdrantService();
@@ -48,10 +60,12 @@ async function migrateToQdrant() {
         try {
           let vector = doc.embedding;
           
-          // If no embedding exists, create one
+          // If no embedding exists, create one using selected AI provider
           if (!vector && doc.content) {
             console.log(`  Creating embedding for document: ${doc._id}`);
-            vector = await createEmbedding(doc.content);
+            const activeProvider = getActiveProvider();
+            const providerConfig = getProviderConfig(activeProvider);
+            vector = await createEmbeddingWithProvider(doc.content, activeProvider, providerConfig);
           }
 
           if (vector) {
@@ -127,7 +141,9 @@ async function testQdrantSearch() {
     const queryText = "insurance policy";
     console.log(`Searching for: "${queryText}"`);
     
-    const queryVector = await createEmbedding(queryText);
+    const activeProvider = getActiveProvider();
+    const providerConfig = getProviderConfig(activeProvider);
+    const queryVector = await createEmbeddingWithProvider(queryText, activeProvider, providerConfig);
     const results = await qdrant.search(queryVector, 5);
     
     console.log(`Found ${results.length} results:`);

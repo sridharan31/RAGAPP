@@ -30,15 +30,24 @@ export interface ChatSession {
 // Document Types
 export interface DocumentMetadata {
   id: string;
-  filename: string;
-  originalName: string;
+  name: string; // Backend uses 'name' instead of 'filename'
+  filename?: string; // Keep for backward compatibility
+  originalName?: string;
   size: number;
-  mimeType: string;
-  uploadedAt: Date;
+  type: string; // Backend uses 'type' instead of 'mimeType'
+  mimeType?: string; // Keep for backward compatibility
+  uploadedAt: string | Date;
   processedAt?: Date;
-  status: 'uploading' | 'processing' | 'processed' | 'failed';
+  status?: 'uploading' | 'processing' | 'processed' | 'failed';
   chunkCount?: number;
   errorMessage?: string;
+  documentType?: string;
+  summary?: string;
+  keywords?: string[];
+  processedBy?: string;
+  metadata?: {
+    [key: string]: any;
+  };
 }
 
 export interface DocumentChunk {
@@ -140,6 +149,9 @@ export interface AppError {
   details?: any;
   timestamp: Date;
 }
+
+// AI Provider Types
+export * from './ai-providers';
 
 // Component Props Types
 export interface BaseComponentProps {

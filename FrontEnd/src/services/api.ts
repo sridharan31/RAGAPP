@@ -92,7 +92,7 @@ class ApiService {
   // Document endpoints
   async uploadDocument(file: File): Promise<ApiResponse<DocumentMetadata>> {
     const formData = new FormData();
-    formData.append('pdfFile', file);
+    formData.append('documentFile', file);
 
     return this.request<DocumentMetadata>({
       method: 'POST',
@@ -105,17 +105,38 @@ class ApiService {
     });
   }
 
-  async getDocuments(): Promise<ApiResponse<DocumentMetadata[]>> {
-    return this.request<DocumentMetadata[]>({
+  async getUploadedFiles(): Promise<ApiResponse<{files: DocumentMetadata[], total: number}>> {
+    return this.request<{files: DocumentMetadata[], total: number}>({
       method: 'GET',
-      url: '/documents',
+      url: '/uploaded-files',
     });
+  }
+
+  async getDocuments(): Promise<ApiResponse<DocumentMetadata[]>> {
+    const response = await this.getUploadedFiles();
+    if (response.success && response.data) {
+      return {
+        success: true,
+        data: response.data.files
+      };
+    }
+    return {
+      success: false,
+      error: response.error || 'Failed to fetch documents'
+    };
   }
 
   async deleteDocument(documentId: string): Promise<ApiResponse<void>> {
     return this.request<void>({
       method: 'DELETE',
-      url: `/documents/${documentId}`,
+      url: `/uploaded-files/${documentId}`,
+    });
+  }
+
+  async getSupportedFormats(): Promise<ApiResponse<any[]>> {
+    return this.request<any[]>({
+      method: 'GET',
+      url: '/supported-formats',
     });
   }
 
@@ -197,6 +218,36 @@ class ApiService {
     return this.request<{ status: string; details?: any }>({
       method: 'GET',
       url: '/qdrant-health',
+    });
+  }
+
+  // AI Provider endpoints
+  async checkProviderStatus(providerId: string): Promise<ApiResponse<{ status: string; models?: string[] }>> {
+    return this.request<{ status: string; models?: string[] }>({
+      method: 'GET',
+      url: `/ai-providers/${providerId}/status`,
+    });
+  }
+
+  async updateProviderConfig(providerId: string, config: any): Promise<ApiResponse<void>> {
+    return this.request<void>({
+      method: 'PUT',
+      url: `/ai-providers/${providerId}/config`,
+      data: config,
+    });
+  }
+
+  async getProviderConfig(providerId: string): Promise<ApiResponse<any>> {
+    return this.request<any>({
+      method: 'GET',
+      url: `/ai-providers/${providerId}/config`,
+    });
+  }
+
+  async setActiveProvider(providerId: string): Promise<ApiResponse<void>> {
+    return this.request<void>({
+      method: 'POST',
+      url: `/ai-providers/${providerId}/activate`,
     });
   }
 

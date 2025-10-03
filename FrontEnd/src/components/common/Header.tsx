@@ -2,7 +2,7 @@ import React from 'react';
 
 interface HeaderProps {
   onSidebarToggle: () => void;
-  currentTab: 'chat' | 'search' | 'documents';
+  currentTab: 'chat' | 'search' | 'documents' | 'settings';
 }
 
 const Header: React.FC<HeaderProps> = ({ onSidebarToggle, currentTab }) => {
@@ -14,6 +14,8 @@ const Header: React.FC<HeaderProps> = ({ onSidebarToggle, currentTab }) => {
         return { title: 'Smart Search', icon: '🔍', subtitle: 'Advanced semantic search' };
       case 'documents':
         return { title: 'Document Manager', icon: '📚', subtitle: 'Upload and organize files' };
+      case 'settings':
+        return { title: 'Settings', icon: '⚙️', subtitle: 'Configure AI providers and preferences' };
       default:
         return { title: 'RAG Assistant', icon: '🚀', subtitle: 'AI-powered document assistant' };
     }
